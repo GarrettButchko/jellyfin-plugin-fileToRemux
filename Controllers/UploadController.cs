@@ -4,11 +4,8 @@ using System.Linq;
 using System.Net.Mime;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Configuration;
-using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -66,15 +63,13 @@ public class UploadController : ControllerBase
     [Authorize(Policy = "DefaultAuthorization")]
     public ActionResult<object> GetLibraries()
     {
-        var folders = _libraryManager.GetUserRootFolder()
-            .GetChildren(new InternalItemsQuery())
-            .OfType<Folder>()
+        var folders = _libraryManager.GetVirtualFolders()
             .Select(f => new
             {
-                Id = f.Id.ToString("N"),
+                Id = f.ItemId,
                 Name = f.Name,
                 CollectionType = f.CollectionType?.ToString() ?? "unknown",
-                Path = f.Path
+                Path = f.Locations.FirstOrDefault() ?? string.Empty
             })
             .ToList();
 
@@ -100,7 +95,7 @@ public class UploadController : ControllerBase
             return BadRequest(new { Error = "Title and Year are required." });
         }
 
-        var libraryPath = ResolveLibraryPath(libraryId, CollectionType.Movies);
+        var libraryPath = ResolveLibraryPath(libraryId, "movies");
         if (libraryPath == null)
         {
             return BadRequest(new { Error = "Could not resolve movie library path on server." });
@@ -144,7 +139,7 @@ public class UploadController : ControllerBase
             {
                 try
                 {
-                    _libraryManager.ScanPath(movieFolder);
+                    _libraryManager.QueueLibraryScan();
                 }
                 catch (Exception ex)
                 {
@@ -196,7 +191,7 @@ public class UploadController : ControllerBase
             return BadRequest(new { Error = "SeriesTitle is required." });
         }
 
-        var libraryPath = ResolveLibraryPath(libraryId, CollectionType.TvShows);
+        var libraryPath = ResolveLibraryPath(libraryId, "tvshows");
         if (libraryPath == null)
         {
             return BadRequest(new { Error = "Could not resolve TV library path on server." });
@@ -241,7 +236,7 @@ public class UploadController : ControllerBase
             {
                 try
                 {
-                    _libraryManager.ScanPath(seasonFolder);
+                    _libraryManager.QueueLibraryScan();
                 }
                 catch (Exception ex)
                 {
@@ -272,24 +267,21 @@ public class UploadController : ControllerBase
         }
     }
 
-    private string? ResolveLibraryPath(string? libraryId, CollectionType preferredType)
+    private string? ResolveLibraryPath(string? libraryId, string preferredType)
     {
-        var folders = _libraryManager.GetUserRootFolder()
-            .GetChildren(new InternalItemsQuery())
-            .OfType<Folder>()
-            .ToList();
+        var folders = _libraryManager.GetVirtualFolders();
 
         if (!string.IsNullOrEmpty(libraryId))
         {
-            var match = folders.FirstOrDefault(f => f.Id.ToString("N").Equals(libraryId, StringComparison.OrdinalIgnoreCase));
-            if (match?.Path != null)
+            var match = folders.FirstOrDefault(f => string.Equals(f.ItemId, libraryId, StringComparison.OrdinalIgnoreCase));
+            if (match?.Locations?.Length > 0)
             {
-                return match.Path;
+                return match.Locations[0];
             }
         }
 
-        var typed = folders.FirstOrDefault(f => f.CollectionType == preferredType);
-        return typed?.Path ?? folders.FirstOrDefault()?.Path;
+        var typed = folders.FirstOrDefault(f => string.Equals(f.CollectionType?.ToString(), preferredType, StringComparison.OrdinalIgnoreCase));
+        return typed?.Locations?.FirstOrDefault() ?? folders.FirstOrDefault()?.Locations?.FirstOrDefault();
     }
 
     private static string SanitizeFilename(string name)
