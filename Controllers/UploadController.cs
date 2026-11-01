@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -57,21 +58,21 @@ public class UploadController : ControllerBase
     }
 
     /// <summary>
-    /// Returns available Movie and TV libraries configured on this Jellyfin server.
+    /// Returns available Movie and TV libraries configured on this Jellyfin server, along with their physical server locations.
     /// </summary>
     [HttpGet("Libraries")]
-    [Authorize(Policy = "DefaultAuthorization")]
+    [Authorize]
     public ActionResult<object> GetLibraries()
     {
-        var folders = _libraryManager.GetVirtualFolders()
-            .Select(f => new
-            {
-                Id = f.ItemId,
-                Name = f.Name,
-                CollectionType = f.CollectionType?.ToString() ?? "unknown",
-                Path = f.Locations.FirstOrDefault() ?? string.Empty
-            })
-            .ToList();
+        var virtualFolders = _libraryManager.GetVirtualFolders();
+        var folders = virtualFolders.Select(vf => new
+        {
+            Id = vf.ItemId,
+            Name = vf.Name,
+            CollectionType = vf.CollectionType?.ToString() ?? "unknown",
+            Locations = vf.Locations,
+            Path = vf.Locations.FirstOrDefault()
+        }).ToList();
 
         return Ok(folders);
     }
@@ -80,7 +81,7 @@ public class UploadController : ControllerBase
     /// Streams an MKV movie directly to the destination library folder and refreshes the library item.
     /// </summary>
     [HttpPost("Upload/Movie")]
-    [Authorize(Policy = "DefaultAuthorization")]
+    [Authorize]
     [DisableRequestSizeLimit]
     [RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue)]
     public async Task<IActionResult> UploadMovie(
@@ -88,6 +89,7 @@ public class UploadController : ControllerBase
         [FromQuery] string year,
         [FromQuery] string imdbId,
         [FromQuery] string? libraryId,
+        [FromQuery] string? serverPath,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(year))
@@ -95,7 +97,7 @@ public class UploadController : ControllerBase
             return BadRequest(new { Error = "Title and Year are required." });
         }
 
-        var libraryPath = ResolveLibraryPath(libraryId, "movies");
+        var libraryPath = ResolveLibraryPath(libraryId, serverPath, CollectionTypeOptions.movies);
         if (libraryPath == null)
         {
             return BadRequest(new { Error = "Could not resolve movie library path on server." });
@@ -143,7 +145,7 @@ public class UploadController : ControllerBase
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "FileToRemux: Error refreshing library scan for {Path}", movieFolder);
+                    _logger.LogError(ex, "FileToRemux: Error requesting library scan");
                 }
             });
 
@@ -173,7 +175,7 @@ public class UploadController : ControllerBase
     /// Streams an MKV episode directly to the TV series season folder and refreshes the library item.
     /// </summary>
     [HttpPost("Upload/Episode")]
-    [Authorize(Policy = "DefaultAuthorization")]
+    [Authorize]
     [DisableRequestSizeLimit]
     [RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue)]
     public async Task<IActionResult> UploadEpisode(
@@ -184,6 +186,7 @@ public class UploadController : ControllerBase
         [FromQuery] int episode,
         [FromQuery] string episodeTitle,
         [FromQuery] string? libraryId,
+        [FromQuery] string? serverPath,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(seriesTitle))
@@ -191,7 +194,7 @@ public class UploadController : ControllerBase
             return BadRequest(new { Error = "SeriesTitle is required." });
         }
 
-        var libraryPath = ResolveLibraryPath(libraryId, "tvshows");
+        var libraryPath = ResolveLibraryPath(libraryId, serverPath, CollectionTypeOptions.tvshows);
         if (libraryPath == null)
         {
             return BadRequest(new { Error = "Could not resolve TV library path on server." });
@@ -240,7 +243,7 @@ public class UploadController : ControllerBase
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "FileToRemux: Error refreshing library scan for {Path}", seasonFolder);
+                    _logger.LogError(ex, "FileToRemux: Error requesting library scan");
                 }
             });
 
@@ -267,21 +270,39 @@ public class UploadController : ControllerBase
         }
     }
 
-    private string? ResolveLibraryPath(string? libraryId, string preferredType)
+    private string? ResolveLibraryPath(string? libraryId, string? serverPath, CollectionTypeOptions preferredType)
     {
-        var folders = _libraryManager.GetVirtualFolders();
+        // 1. Direct explicit server path if provided
+        if (!string.IsNullOrWhiteSpace(serverPath))
+        {
+            return serverPath.Trim();
+        }
 
+        var virtualFolders = _libraryManager.GetVirtualFolders();
+
+        // 2. Specific library ID or Name match
         if (!string.IsNullOrEmpty(libraryId))
         {
-            var match = folders.FirstOrDefault(f => string.Equals(f.ItemId, libraryId, StringComparison.OrdinalIgnoreCase));
-            if (match?.Locations?.Length > 0)
+            var match = virtualFolders.FirstOrDefault(f =>
+                string.Equals(f.ItemId, libraryId, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(f.Name, libraryId, StringComparison.OrdinalIgnoreCase));
+            var location = match?.Locations.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+            if (location != null)
             {
-                return match.Locations[0];
+                return location;
             }
         }
 
-        var typed = folders.FirstOrDefault(f => string.Equals(f.CollectionType?.ToString(), preferredType, StringComparison.OrdinalIgnoreCase));
-        return typed?.Locations?.FirstOrDefault() ?? folders.FirstOrDefault()?.Locations?.FirstOrDefault();
+        // 3. Preferred collection type match (e.g. movies or tvshows)
+        var typed = virtualFolders.FirstOrDefault(f => f.CollectionType == preferredType);
+        var typedLocation = typed?.Locations.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+        if (typedLocation != null)
+        {
+            return typedLocation;
+        }
+
+        // 4. Any folder with a location
+        return virtualFolders.SelectMany(f => f.Locations).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
     }
 
     private static string SanitizeFilename(string name)
