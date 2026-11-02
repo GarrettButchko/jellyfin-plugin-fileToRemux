@@ -124,18 +124,18 @@ public class UploadController : ControllerBase
 
         Directory.CreateDirectory(movieFolder);
 
-        var tempPath = Path.Combine(movieFolder, $"{folderName}.uploading.tmp");
+        // Remove leftovers from any interrupted attempt before starting a new transfer.
+        await RemoveStaleTempFilesAsync(movieFolder, folderName);
 
         if (System.IO.File.Exists(destMkv))
         {
             _logger.LogWarning("FileToRemux: Movie upload rejected; destination already exists at {Path}", destMkv);
-            CleanUpTemp(tempPath);
             return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
         }
 
-        // Clear any temp file left behind by an interrupted upload so stale bytes cannot be
-        // mistaken for the current transfer.
-        CleanUpTemp(tempPath);
+        // A unique name per attempt means a stale temp file that is still locked by an
+        // in-flight request can no longer block a retry from starting.
+        var tempPath = Path.Combine(movieFolder, $"{folderName}.mkv.{Guid.NewGuid():N}.uploading.tmp");
 
         try
         {
@@ -160,6 +160,10 @@ public class UploadController : ControllerBase
 
             System.IO.File.Move(tempPath, destMkv);
             _logger.LogInformation("FileToRemux: Upload completed. Saved to {Path}", destMkv);
+
+            // The previous attempt's temp file may have been locked during this upload.
+            // Sweep again now that the old request has hopefully released it.
+            await RemoveStaleTempFilesAsync(movieFolder, folderName);
 
             // Queue a library scan for the new folder
             _ = Task.Run(() =>
@@ -250,18 +254,18 @@ public class UploadController : ControllerBase
 
         Directory.CreateDirectory(seasonFolder);
 
-        var tempPath = Path.Combine(seasonFolder, $"{fileName}.uploading.tmp");
+        // Remove leftovers from any interrupted attempt before starting a new transfer.
+        await RemoveStaleTempFilesAsync(seasonFolder, fileName);
 
         if (System.IO.File.Exists(destMkv))
         {
             _logger.LogWarning("FileToRemux: Episode upload rejected; destination already exists at {Path}", destMkv);
-            CleanUpTemp(tempPath);
             return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
         }
 
-        // Clear any temp file left behind by an interrupted upload so stale bytes cannot be
-        // mistaken for the current transfer.
-        CleanUpTemp(tempPath);
+        // A unique name per attempt means a stale temp file that is still locked by an
+        // in-flight request can no longer block a retry from starting.
+        var tempPath = Path.Combine(seasonFolder, $"{fileName}.{Guid.NewGuid():N}.uploading.tmp");
 
         try
         {
@@ -286,6 +290,10 @@ public class UploadController : ControllerBase
 
             System.IO.File.Move(tempPath, destMkv);
             _logger.LogInformation("FileToRemux: Episode upload completed. Saved to {Path}", destMkv);
+
+            // The previous attempt's temp file may have been locked during this upload.
+            // Sweep again now that the old request has hopefully released it.
+            await RemoveStaleTempFilesAsync(seasonFolder, fileName);
 
             _ = Task.Run(() =>
             {
@@ -424,6 +432,62 @@ public class UploadController : ControllerBase
             && value.Skip(2).All(c => c >= '0' && c <= '9')
                 ? value.ToLowerInvariant()
                 : string.Empty;
+    }
+
+    /// <summary>
+    /// Deletes leftover temp files for the given media destination. Files still locked by an
+    /// in-flight request are left alone so they cannot break a retry.
+    /// </summary>
+    private async Task RemoveStaleTempFilesAsync(string folder, string mediaBaseName)
+    {
+        const string suffix = ".uploading.tmp";
+        var prefix = mediaBaseName + ".";
+
+        string[] candidates;
+        try
+        {
+            candidates = Directory.GetFiles(folder);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FileToRemux: Could not scan {Folder} for stale temp files", folder);
+            return;
+        }
+
+        foreach (var file in candidates)
+        {
+            var name = Path.GetFileName(file);
+            if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                !name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                try
+                {
+                    System.IO.File.Delete(file);
+                    _logger.LogInformation("FileToRemux: Removed stale upload temp file {Path}", file);
+                    break;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    if (attempt == 3)
+                    {
+                        _logger.LogWarning(ex, "FileToRemux: Stale temp file is still locked; leaving it for the next upload: {Path}", file);
+                        break;
+                    }
+
+                    await Task.Delay(250);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "FileToRemux: Could not remove stale temp file {Path}", file);
+                    break;
+                }
+            }
+        }
     }
 
     private static void CleanUpTemp(string path)
