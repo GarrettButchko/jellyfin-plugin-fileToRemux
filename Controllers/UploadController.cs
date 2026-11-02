@@ -123,9 +123,10 @@ public class UploadController : ControllerBase
         _logger.LogInformation("FileToRemux: Receiving movie upload for {Title} ({Year}) into {Destination}", title, year ?? "unknown", destMkv);
 
         Directory.CreateDirectory(movieFolder);
+        TempFileTracker.TrackFolder(movieFolder);
 
-        // Remove leftovers from any interrupted attempt before starting a new transfer.
-        await RemoveStaleTempFilesAsync(movieFolder, folderName);
+        // A movie folder holds a single movie, so any temp file in it is safe to remove.
+        await RemoveStaleTempFilesAsync(movieFolder, folderName, matchAll: true);
 
         if (System.IO.File.Exists(destMkv))
         {
@@ -136,6 +137,7 @@ public class UploadController : ControllerBase
         // A unique name per attempt means a stale temp file that is still locked by an
         // in-flight request can no longer block a retry from starting.
         var tempPath = Path.Combine(movieFolder, $"{folderName}.mkv.{Guid.NewGuid():N}.uploading.tmp");
+        TempFileTracker.RegisterActive(tempPath);
 
         try
         {
@@ -163,7 +165,7 @@ public class UploadController : ControllerBase
 
             // The previous attempt's temp file may have been locked during this upload.
             // Sweep again now that the old request has hopefully released it.
-            await RemoveStaleTempFilesAsync(movieFolder, folderName);
+            await RemoveStaleTempFilesAsync(movieFolder, folderName, matchAll: true);
 
             // Queue a library scan for the new folder
             _ = Task.Run(() =>
@@ -197,6 +199,10 @@ public class UploadController : ControllerBase
             _logger.LogError(ex, "FileToRemux: Upload failed for {Title}", title);
             CleanUpTemp(tempPath);
             return StatusCode(StatusCodes.Status500InternalServerError, new { Error = ex.Message });
+        }
+        finally
+        {
+            TempFileTracker.UnregisterActive(tempPath);
         }
     }
 
@@ -253,6 +259,7 @@ public class UploadController : ControllerBase
         _logger.LogInformation("FileToRemux: Receiving episode upload {FileName} into {Destination}", fileName, destMkv);
 
         Directory.CreateDirectory(seasonFolder);
+        TempFileTracker.TrackFolder(seasonFolder);
 
         // Remove leftovers from any interrupted attempt before starting a new transfer.
         await RemoveStaleTempFilesAsync(seasonFolder, fileName);
@@ -266,6 +273,7 @@ public class UploadController : ControllerBase
         // A unique name per attempt means a stale temp file that is still locked by an
         // in-flight request can no longer block a retry from starting.
         var tempPath = Path.Combine(seasonFolder, $"{fileName}.{Guid.NewGuid():N}.uploading.tmp");
+        TempFileTracker.RegisterActive(tempPath);
 
         try
         {
@@ -328,6 +336,10 @@ public class UploadController : ControllerBase
             CleanUpTemp(tempPath);
             return StatusCode(StatusCodes.Status500InternalServerError, new { Error = ex.Message });
         }
+        finally
+        {
+            TempFileTracker.UnregisterActive(tempPath);
+        }
     }
 
     private string? ResolveLibraryPath(string? libraryId, string? serverPath, CollectionTypeOptions preferredType)
@@ -378,30 +390,80 @@ public class UploadController : ControllerBase
             constructed += $" [imdbid-{safeImdb}]";
         }
 
-        // When the client has no metadata, reuse an existing folder for the same title so
-        // repeated uploads don't create a second, split library entry.
-        if (safeYear.Length > 0 || safeImdb.Length > 0 || !Directory.Exists(libraryPath))
+        if (!Directory.Exists(libraryPath))
         {
             return constructed;
         }
 
+        // Reuse an existing folder for the same title so repeated uploads (and retries after an
+        // interrupted upload) don't create a second, split library entry. Older plugin versions
+        // wrote folders such as "Title (2020) [imdbid-]" even when no IMDb id was known, so a
+        // stricter name match would strand their temp files in a folder nobody uploads to again.
+        string? compatible = null;
         foreach (var directory in Directory.EnumerateDirectories(libraryPath))
         {
-            var name = Path.GetFileName(directory);
-            if (name != null && MatchesNameWithOptionalMetadata(name, safeName))
+            var folderName = Path.GetFileName(directory);
+            if (folderName == null ||
+                !TryParseMediaFolderName(folderName, out var existingName, out var existingYear, out var existingImdb) ||
+                !string.Equals(existingName, safeName, StringComparison.OrdinalIgnoreCase))
             {
-                return name;
+                continue;
+            }
+
+            if (existingYear.Length > 0 && safeYear.Length > 0 &&
+                !string.Equals(existingYear, safeYear, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (existingImdb.Length > 0 && safeImdb.Length > 0 &&
+                !string.Equals(existingImdb, safeImdb, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (string.Equals(folderName, constructed, StringComparison.OrdinalIgnoreCase))
+            {
+                return folderName;
+            }
+
+            compatible ??= folderName;
+        }
+
+        return compatible ?? constructed;
+    }
+
+    /// <summary>
+    /// Splits "Name (Year) [imdbid-tt123]" into its parts. Missing metadata is returned empty.
+    /// </summary>
+    private static bool TryParseMediaFolderName(string folderName, out string name, out string year, out string imdb)
+    {
+        name = folderName.Trim();
+        year = string.Empty;
+        imdb = string.Empty;
+
+        const string imdbMarker = " [imdbid-";
+        var imdbIndex = name.LastIndexOf(imdbMarker, StringComparison.OrdinalIgnoreCase);
+        if (imdbIndex >= 0 && name.EndsWith("]", StringComparison.Ordinal))
+        {
+            var value = name[(imdbIndex + imdbMarker.Length)..^1].Trim();
+            imdb = value.Equals("none", StringComparison.OrdinalIgnoreCase) ? string.Empty : value;
+            name = name[..imdbIndex].TrimEnd();
+        }
+
+        const string yearMarker = " (";
+        var yearIndex = name.LastIndexOf(yearMarker, StringComparison.Ordinal);
+        if (yearIndex >= 0 && name.EndsWith(")", StringComparison.Ordinal))
+        {
+            var value = name[(yearIndex + yearMarker.Length)..^1];
+            if (value.Length == 4 && value.All(c => c >= '0' && c <= '9'))
+            {
+                year = value;
+                name = name[..yearIndex].TrimEnd();
             }
         }
 
-        return constructed;
-    }
-
-    private static bool MatchesNameWithOptionalMetadata(string folderName, string name)
-    {
-        return string.Equals(folderName, name, StringComparison.OrdinalIgnoreCase)
-            || folderName.StartsWith(name + " (", StringComparison.OrdinalIgnoreCase)
-            || folderName.StartsWith(name + " [", StringComparison.OrdinalIgnoreCase);
+        return name.Length > 0;
     }
 
     private static string SanitizeFilename(string name)
@@ -438,7 +500,7 @@ public class UploadController : ControllerBase
     /// Deletes leftover temp files for the given media destination. Files still locked by an
     /// in-flight request are left alone so they cannot break a retry.
     /// </summary>
-    private async Task RemoveStaleTempFilesAsync(string folder, string mediaBaseName)
+    private async Task RemoveStaleTempFilesAsync(string folder, string mediaBaseName, bool matchAll = false)
     {
         const string suffix = ".uploading.tmp";
         var prefix = mediaBaseName + ".";
@@ -457,8 +519,9 @@ public class UploadController : ControllerBase
         foreach (var file in candidates)
         {
             var name = Path.GetFileName(file);
-            if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
-                !name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            if ((!matchAll && !name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) ||
+                !name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) ||
+                TempFileTracker.IsActive(file))
             {
                 continue;
             }
