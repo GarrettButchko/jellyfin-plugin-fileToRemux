@@ -126,6 +126,17 @@ public class UploadController : ControllerBase
 
         var tempPath = Path.Combine(movieFolder, $"{folderName}.uploading.tmp");
 
+        if (System.IO.File.Exists(destMkv))
+        {
+            _logger.LogWarning("FileToRemux: Movie upload rejected; destination already exists at {Path}", destMkv);
+            CleanUpTemp(tempPath);
+            return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
+        }
+
+        // Clear any temp file left behind by an interrupted upload so stale bytes cannot be
+        // mistaken for the current transfer.
+        CleanUpTemp(tempPath);
+
         try
         {
             await using (var fileStream = new FileStream(
@@ -139,9 +150,12 @@ public class UploadController : ControllerBase
                 await Request.Body.CopyToAsync(fileStream, cancellationToken);
             }
 
+            // Another upload may have finished while this one was streaming.
             if (System.IO.File.Exists(destMkv))
             {
-                System.IO.File.Delete(destMkv);
+                _logger.LogWarning("FileToRemux: Movie upload rejected after streaming; destination already exists at {Path}", destMkv);
+                CleanUpTemp(tempPath);
+                return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
             }
 
             System.IO.File.Move(tempPath, destMkv);
@@ -238,6 +252,17 @@ public class UploadController : ControllerBase
 
         var tempPath = Path.Combine(seasonFolder, $"{fileName}.uploading.tmp");
 
+        if (System.IO.File.Exists(destMkv))
+        {
+            _logger.LogWarning("FileToRemux: Episode upload rejected; destination already exists at {Path}", destMkv);
+            CleanUpTemp(tempPath);
+            return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
+        }
+
+        // Clear any temp file left behind by an interrupted upload so stale bytes cannot be
+        // mistaken for the current transfer.
+        CleanUpTemp(tempPath);
+
         try
         {
             await using (var fileStream = new FileStream(
@@ -251,9 +276,12 @@ public class UploadController : ControllerBase
                 await Request.Body.CopyToAsync(fileStream, cancellationToken);
             }
 
+            // Another upload may have finished while this one was streaming.
             if (System.IO.File.Exists(destMkv))
             {
-                System.IO.File.Delete(destMkv);
+                _logger.LogWarning("FileToRemux: Episode upload rejected after streaming; destination already exists at {Path}", destMkv);
+                CleanUpTemp(tempPath);
+                return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
             }
 
             System.IO.File.Move(tempPath, destMkv);
