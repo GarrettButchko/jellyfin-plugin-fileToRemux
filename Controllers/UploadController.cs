@@ -123,10 +123,6 @@ public class UploadController : ControllerBase
         _logger.LogInformation("FileToRemux: Receiving movie upload for {Title} ({Year}) into {Destination}", title, year ?? "unknown", destMkv);
 
         Directory.CreateDirectory(movieFolder);
-        TempFileTracker.TrackFolder(movieFolder);
-
-        // A movie folder holds a single movie, so any temp file in it is safe to remove.
-        await RemoveStaleTempFilesAsync(movieFolder, folderName, matchAll: true);
 
         if (System.IO.File.Exists(destMkv))
         {
@@ -162,10 +158,6 @@ public class UploadController : ControllerBase
 
             System.IO.File.Move(tempPath, destMkv);
             _logger.LogInformation("FileToRemux: Upload completed. Saved to {Path}", destMkv);
-
-            // The previous attempt's temp file may have been locked during this upload.
-            // Sweep again now that the old request has hopefully released it.
-            await RemoveStaleTempFilesAsync(movieFolder, folderName, matchAll: true);
 
             // Queue a library scan for the new folder
             _ = Task.Run(() =>
@@ -203,7 +195,6 @@ public class UploadController : ControllerBase
         finally
         {
             TempFileTracker.UnregisterActive(tempPath);
-            ScheduleLingeringTempCleanup(movieFolder);
         }
     }
 
@@ -260,10 +251,6 @@ public class UploadController : ControllerBase
         _logger.LogInformation("FileToRemux: Receiving episode upload {FileName} into {Destination}", fileName, destMkv);
 
         Directory.CreateDirectory(seasonFolder);
-        TempFileTracker.TrackFolder(seasonFolder);
-
-        // Remove leftovers from any interrupted attempt before starting a new transfer.
-        await RemoveStaleTempFilesAsync(seasonFolder, fileName);
 
         if (System.IO.File.Exists(destMkv))
         {
@@ -299,10 +286,6 @@ public class UploadController : ControllerBase
 
             System.IO.File.Move(tempPath, destMkv);
             _logger.LogInformation("FileToRemux: Episode upload completed. Saved to {Path}", destMkv);
-
-            // The previous attempt's temp file may have been locked during this upload.
-            // Sweep again now that the old request has hopefully released it.
-            await RemoveStaleTempFilesAsync(seasonFolder, fileName);
 
             _ = Task.Run(() =>
             {
@@ -340,7 +323,6 @@ public class UploadController : ControllerBase
         finally
         {
             TempFileTracker.UnregisterActive(tempPath);
-            ScheduleLingeringTempCleanup(seasonFolder);
         }
     }
 
@@ -496,122 +478,6 @@ public class UploadController : ControllerBase
             && value.Skip(2).All(c => c >= '0' && c <= '9')
                 ? value.ToLowerInvariant()
                 : string.Empty;
-    }
-
-    /// <summary>
-    /// Keeps retrying the folder for a while after an upload ends. Windows keeps a temp file
-    /// locked until the request that owned it is fully torn down, which can be much later than
-    /// the point where the upload response was sent.
-    /// </summary>
-    private void ScheduleLingeringTempCleanup(string folder)
-    {
-        _ = Task.Run(async () =>
-        {
-            var deadline = DateTime.UtcNow.AddMinutes(20);
-            while (DateTime.UtcNow < deadline)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(10));
-
-                var remaining = 0;
-                try
-                {
-                    if (!Directory.Exists(folder))
-                    {
-                        return;
-                    }
-
-                    foreach (var file in Directory.EnumerateFiles(folder, "*.uploading.tmp"))
-                    {
-                        if (TempFileTracker.IsActive(file))
-                        {
-                            remaining++;
-                            continue;
-                        }
-
-                        try
-                        {
-                            System.IO.File.Delete(file);
-                            _logger.LogInformation("FileToRemux: Removed lingering upload temp file {Path}", file);
-                        }
-                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                        {
-                            remaining++;
-                        }
-                    }
-                }
-                catch (DirectoryNotFoundException)
-                {
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, "FileToRemux: Could not clean lingering temp files in {Folder}", folder);
-                    return;
-                }
-
-                if (remaining == 0)
-                {
-                    return;
-                }
-            }
-        });
-    }
-
-    /// <summary>
-    /// Deletes leftover temp files for the given media destination. Files still locked by an
-    /// in-flight request are left alone so they cannot break a retry.
-    /// </summary>
-    private async Task RemoveStaleTempFilesAsync(string folder, string mediaBaseName, bool matchAll = false)
-    {
-        const string suffix = ".uploading.tmp";
-        var prefix = mediaBaseName + ".";
-
-        string[] candidates;
-        try
-        {
-            candidates = Directory.GetFiles(folder);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "FileToRemux: Could not scan {Folder} for stale temp files", folder);
-            return;
-        }
-
-        foreach (var file in candidates)
-        {
-            var name = Path.GetFileName(file);
-            if ((!matchAll && !name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) ||
-                !name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) ||
-                TempFileTracker.IsActive(file))
-            {
-                continue;
-            }
-
-            for (var attempt = 1; attempt <= 3; attempt++)
-            {
-                try
-                {
-                    System.IO.File.Delete(file);
-                    _logger.LogInformation("FileToRemux: Removed stale upload temp file {Path}", file);
-                    break;
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    if (attempt == 3)
-                    {
-                        _logger.LogWarning(ex, "FileToRemux: Stale temp file is still locked; leaving it for the next upload: {Path}", file);
-                        break;
-                    }
-
-                    await Task.Delay(250);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "FileToRemux: Could not remove stale temp file {Path}", file);
-                    break;
-                }
-            }
-        }
     }
 
     private static void CleanUpTemp(string path)

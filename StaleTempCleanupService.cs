@@ -11,17 +11,13 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.FileToRemux;
 
 /// <summary>
-/// Removes upload temp files left behind by interrupted uploads. On Windows a temp file that
-/// was still open could not be deleted by the upload request itself, so the cleaner retries
-/// it later instead of leaving it in the library forever.
+/// Removes upload temp files left behind by interrupted uploads. Cleanup runs once when the
+/// server starts, because on Windows a temp file can stay locked by a request that outlived
+/// the upload and cannot reliably be removed while that handle is still open.
 /// </summary>
 public sealed class StaleTempCleanupService : BackgroundService
 {
-    private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan FolderScanInterval = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan FullScanInterval = TimeSpan.FromHours(6);
-    private static readonly TimeSpan RecentFileAge = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan RecentFolderFileAge = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(20);
 
     private readonly ILibraryManager _libraryManager;
     private readonly ILogger<StaleTempCleanupService> _logger;
@@ -47,41 +43,13 @@ public sealed class StaleTempCleanupService : BackgroundService
             return;
         }
 
-        _logger.LogInformation("FileToRemux: Upload temp cleanup service started");
+        _logger.LogInformation("FileToRemux: Starting upload temp cleanup");
 
-        // Nothing can be uploading across a server restart, so every temp file is stale now.
-        RunFullScan(TimeSpan.Zero);
-
-        var lastFullScan = DateTime.UtcNow;
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                await Task.Delay(FolderScanInterval, stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-
-            try
-            {
-                ScanTrackedFolders();
-
-                if (DateTime.UtcNow - lastFullScan >= FullScanInterval)
-                {
-                    RunFullScan(RecentFileAge);
-                    lastFullScan = DateTime.UtcNow;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "FileToRemux: Error while cleaning upload temp files");
-            }
-        }
+        // Nothing can still be uploading across a server restart, so every temp file is stale.
+        RunStartupScan();
     }
 
-    private void RunFullScan(TimeSpan minimumAge)
+    private void RunStartupScan()
     {
         var candidates = 0;
         var removed = 0;
@@ -99,29 +67,10 @@ public sealed class StaleTempCleanupService : BackgroundService
 
                 foreach (var file in Directory.EnumerateFiles(root, "*.uploading.tmp", options))
                 {
-                    if (TempFileTracker.IsActive(file))
-                    {
-                        continue;
-                    }
-
-                    if (DateTime.UtcNow - SafeLastWriteTimeUtc(file) < minimumAge)
-                    {
-                        continue;
-                    }
-
                     candidates++;
                     if (TryDelete(file))
                     {
                         removed++;
-                    }
-                    else
-                    {
-                        // Still open by a lingering request; retry this folder every 10 seconds.
-                        var folder = Path.GetDirectoryName(file);
-                        if (!string.IsNullOrEmpty(folder))
-                        {
-                            TempFileTracker.TrackFolder(folder);
-                        }
                     }
                 }
             }
@@ -134,57 +83,9 @@ public sealed class StaleTempCleanupService : BackgroundService
         if (candidates > 0)
         {
             _logger.LogInformation(
-                "FileToRemux: Temp cleanup scan removed {Removed} of {Candidates} stale temp file(s)",
+                "FileToRemux: Startup temp cleanup removed {Removed} of {Candidates} stale temp file(s)",
                 removed,
                 candidates);
-        }
-    }
-
-    private void ScanTrackedFolders()
-    {
-        var removed = 0;
-        foreach (var folder in TempFileTracker.GetTrackedFolders())
-        {
-            try
-            {
-                if (!Directory.Exists(folder))
-                {
-                    continue;
-                }
-
-                foreach (var file in Directory.EnumerateFiles(folder, "*.uploading.tmp"))
-                {
-                    if (TempFileTracker.IsActive(file))
-                    {
-                        continue;
-                    }
-
-                    if (DateTime.UtcNow - SafeLastWriteTimeUtc(file) < RecentFolderFileAge)
-                    {
-                        continue;
-                    }
-
-                    if (TryDelete(file))
-                    {
-                        removed++;
-                    }
-                }
-            }
-            catch (DirectoryNotFoundException)
-            {
-                // Folder was removed; nothing to clean.
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "FileToRemux: Could not scan {Folder} for stale upload temp files", folder);
-            }
-        }
-
-        if (removed > 0)
-        {
-            _logger.LogInformation(
-                "FileToRemux: Temp cleanup removed {Removed} stale temp file(s) from upload folders",
-                removed);
         }
     }
 
@@ -205,18 +106,6 @@ public sealed class StaleTempCleanupService : BackgroundService
         }
     }
 
-    private static DateTime SafeLastWriteTimeUtc(string path)
-    {
-        try
-        {
-            return File.GetLastWriteTimeUtc(path);
-        }
-        catch
-        {
-            return DateTime.UtcNow;
-        }
-    }
-
     private bool TryDelete(string file)
     {
         try
@@ -227,6 +116,8 @@ public sealed class StaleTempCleanupService : BackgroundService
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            // Still open; it will be handled on the next server restart.
+            _logger.LogDebug(ex, "FileToRemux: Stale temp file is still locked {Path}", file);
             return false;
         }
         catch (Exception ex)
