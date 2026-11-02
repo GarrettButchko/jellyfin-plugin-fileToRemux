@@ -18,4 +18,27 @@
     <PackageReference Include="Jellyfin.Model" Version="10.9.11" IncludeAssets="compile" />
   </ItemGroup>
 
+  <!--
+    Derive the assembly version from the most recent git tag (e.g. v1.0.1) so the
+    plugin's Status endpoint reports the released version automatically. Falls back
+    to the <Version> above when git or tags are unavailable. An explicit command-line
+    -p:Version=... always wins because global properties cannot be overridden.
+  -->
+  <Target Name="GetVersionFromGitTag" BeforeTargets="GetAssemblyVersion">
+    <Exec Command="git describe --tags --abbrev=0"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitTag" />
+    </Exec>
+    <PropertyGroup Condition="'$(_GitTag)' != ''">
+      <_GitTagVersion>$([System.Text.RegularExpressions.Regex]::Replace('$(_GitTag.Trim())', '^v', ''))</_GitTagVersion>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(_GitTagVersion)' != ''">
+      <Version>$(_GitTagVersion)</Version>
+      <InformationalVersion>$(_GitTagVersion)</InformationalVersion>
+    </PropertyGroup>
+  </Target>
+
 </Project>

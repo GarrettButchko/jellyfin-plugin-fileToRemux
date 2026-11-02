@@ -47,11 +47,15 @@ public class UploadController : ControllerBase
     public ActionResult<object> GetStatus()
     {
         var config = Plugin.Instance?.Configuration;
+        var pluginVersion = Plugin.Instance?.Version;
+        var version = pluginVersion is null
+            ? "0.0.0"
+            : (pluginVersion.Revision > 0 ? pluginVersion.ToString() : pluginVersion.ToString(3));
         return Ok(new
         {
             Plugin = "FileToRemux",
             Installed = true,
-            Version = "1.0.0",
+            Version = version,
             DirectUploadsEnabled = config?.EnableDirectUploads ?? true,
             ServerName = _configManager.Configuration.ServerName ?? "Jellyfin"
         });
