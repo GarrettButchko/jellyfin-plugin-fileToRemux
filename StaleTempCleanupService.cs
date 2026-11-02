@@ -17,11 +17,11 @@ namespace Jellyfin.Plugin.FileToRemux;
 /// </summary>
 public sealed class StaleTempCleanupService : BackgroundService
 {
-    private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan FolderScanInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan FolderScanInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan FullScanInterval = TimeSpan.FromHours(6);
     private static readonly TimeSpan RecentFileAge = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan RecentFolderFileAge = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan RecentFolderFileAge = TimeSpan.FromSeconds(5);
 
     private readonly ILibraryManager _libraryManager;
     private readonly ILogger<StaleTempCleanupService> _logger;
@@ -46,6 +46,8 @@ public sealed class StaleTempCleanupService : BackgroundService
         {
             return;
         }
+
+        _logger.LogInformation("FileToRemux: Upload temp cleanup service started");
 
         // Nothing can be uploading across a server restart, so every temp file is stale now.
         RunFullScan(TimeSpan.Zero);
@@ -81,6 +83,9 @@ public sealed class StaleTempCleanupService : BackgroundService
 
     private void RunFullScan(TimeSpan minimumAge)
     {
+        var candidates = 0;
+        var removed = 0;
+
         foreach (var root in GetLibraryRoots())
         {
             try
@@ -104,9 +109,14 @@ public sealed class StaleTempCleanupService : BackgroundService
                         continue;
                     }
 
-                    if (!TryDelete(file))
+                    candidates++;
+                    if (TryDelete(file))
                     {
-                        // Still open by a lingering request; retry this folder every 30 seconds.
+                        removed++;
+                    }
+                    else
+                    {
+                        // Still open by a lingering request; retry this folder every 10 seconds.
                         var folder = Path.GetDirectoryName(file);
                         if (!string.IsNullOrEmpty(folder))
                         {
@@ -120,10 +130,19 @@ public sealed class StaleTempCleanupService : BackgroundService
                 _logger.LogWarning(ex, "FileToRemux: Could not scan {Root} for stale upload temp files", root);
             }
         }
+
+        if (candidates > 0)
+        {
+            _logger.LogInformation(
+                "FileToRemux: Temp cleanup scan removed {Removed} of {Candidates} stale temp file(s)",
+                removed,
+                candidates);
+        }
     }
 
     private void ScanTrackedFolders()
     {
+        var removed = 0;
         foreach (var folder in TempFileTracker.GetTrackedFolders())
         {
             try
@@ -145,7 +164,10 @@ public sealed class StaleTempCleanupService : BackgroundService
                         continue;
                     }
 
-                    TryDelete(file);
+                    if (TryDelete(file))
+                    {
+                        removed++;
+                    }
                 }
             }
             catch (DirectoryNotFoundException)
@@ -156,6 +178,13 @@ public sealed class StaleTempCleanupService : BackgroundService
             {
                 _logger.LogDebug(ex, "FileToRemux: Could not scan {Folder} for stale upload temp files", folder);
             }
+        }
+
+        if (removed > 0)
+        {
+            _logger.LogInformation(
+                "FileToRemux: Temp cleanup removed {Removed} stale temp file(s) from upload folders",
+                removed);
         }
     }
 

@@ -203,6 +203,7 @@ public class UploadController : ControllerBase
         finally
         {
             TempFileTracker.UnregisterActive(tempPath);
+            ScheduleLingeringTempCleanup(movieFolder);
         }
     }
 
@@ -339,6 +340,7 @@ public class UploadController : ControllerBase
         finally
         {
             TempFileTracker.UnregisterActive(tempPath);
+            ScheduleLingeringTempCleanup(seasonFolder);
         }
     }
 
@@ -494,6 +496,65 @@ public class UploadController : ControllerBase
             && value.Skip(2).All(c => c >= '0' && c <= '9')
                 ? value.ToLowerInvariant()
                 : string.Empty;
+    }
+
+    /// <summary>
+    /// Keeps retrying the folder for a while after an upload ends. Windows keeps a temp file
+    /// locked until the request that owned it is fully torn down, which can be much later than
+    /// the point where the upload response was sent.
+    /// </summary>
+    private void ScheduleLingeringTempCleanup(string folder)
+    {
+        _ = Task.Run(async () =>
+        {
+            var deadline = DateTime.UtcNow.AddMinutes(20);
+            while (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10));
+
+                var remaining = 0;
+                try
+                {
+                    if (!Directory.Exists(folder))
+                    {
+                        return;
+                    }
+
+                    foreach (var file in Directory.EnumerateFiles(folder, "*.uploading.tmp"))
+                    {
+                        if (TempFileTracker.IsActive(file))
+                        {
+                            remaining++;
+                            continue;
+                        }
+
+                        try
+                        {
+                            System.IO.File.Delete(file);
+                            _logger.LogInformation("FileToRemux: Removed lingering upload temp file {Path}", file);
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            remaining++;
+                        }
+                    }
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "FileToRemux: Could not clean lingering temp files in {Folder}", folder);
+                    return;
+                }
+
+                if (remaining == 0)
+                {
+                    return;
+                }
+            }
+        });
     }
 
     /// <summary>
