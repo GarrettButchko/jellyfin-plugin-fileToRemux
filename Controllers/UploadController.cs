@@ -90,15 +90,15 @@ public class UploadController : ControllerBase
     [RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue)]
     public async Task<IActionResult> UploadMovie(
         [FromQuery] string title,
-        [FromQuery] string year,
-        [FromQuery] string imdbId,
+        [FromQuery] string? year,
+        [FromQuery] string? imdbId,
         [FromQuery] string? libraryId,
         [FromQuery] string? serverPath,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(year))
+        if (string.IsNullOrWhiteSpace(title))
         {
-            return BadRequest(new { Error = "Title and Year are required." });
+            return BadRequest(new { Error = "Title is required." });
         }
 
         var libraryPath = ResolveLibraryPath(libraryId, serverPath, CollectionTypeOptions.movies);
@@ -108,12 +108,19 @@ public class UploadController : ControllerBase
         }
 
         var safeTitle = SanitizeFilename(title);
-        var safeImdb = SanitizeFilename(imdbId ?? "none");
-        var folderName = $"{safeTitle} ({year}) [imdbid-{safeImdb}]";
+        if (string.IsNullOrWhiteSpace(safeTitle))
+        {
+            return BadRequest(new { Error = "Title does not contain a usable folder name." });
+        }
+
+        var safeYear = NormalizeYear(year);
+        var safeImdb = NormalizeImdbId(imdbId);
+        var folderName = ResolveMediaFolderName(libraryPath, safeTitle, safeYear, safeImdb);
+
         var movieFolder = Path.Combine(libraryPath, folderName);
         var destMkv = Path.Combine(movieFolder, $"{folderName}.mkv");
 
-        _logger.LogInformation("FileToRemux: Receiving movie upload for {Title} ({Year}) into {Destination}", title, year, destMkv);
+        _logger.LogInformation("FileToRemux: Receiving movie upload for {Title} ({Year}) into {Destination}", title, year ?? "unknown", destMkv);
 
         Directory.CreateDirectory(movieFolder);
 
@@ -158,7 +165,7 @@ public class UploadController : ControllerBase
                 Status = "Success",
                 Path = destMkv,
                 Title = title,
-                Year = year
+                Year = year ?? string.Empty
             });
         }
         catch (OperationCanceledException)
@@ -184,11 +191,11 @@ public class UploadController : ControllerBase
     [RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue)]
     public async Task<IActionResult> UploadEpisode(
         [FromQuery] string seriesTitle,
-        [FromQuery] string seriesYear,
-        [FromQuery] string seriesImdbId,
+        [FromQuery] string? seriesYear,
+        [FromQuery] string? seriesImdbId,
         [FromQuery] int season,
         [FromQuery] int episode,
-        [FromQuery] string episodeTitle,
+        [FromQuery] string? episodeTitle,
         [FromQuery] string? libraryId,
         [FromQuery] string? serverPath,
         CancellationToken cancellationToken)
@@ -198,6 +205,11 @@ public class UploadController : ControllerBase
             return BadRequest(new { Error = "SeriesTitle is required." });
         }
 
+        if (season < 0 || episode < 0)
+        {
+            return BadRequest(new { Error = "Season and episode must be zero or greater." });
+        }
+
         var libraryPath = ResolveLibraryPath(libraryId, serverPath, CollectionTypeOptions.tvshows);
         if (libraryPath == null)
         {
@@ -205,9 +217,17 @@ public class UploadController : ControllerBase
         }
 
         var safeSeries = SanitizeFilename(seriesTitle);
-        var safeImdb = SanitizeFilename(seriesImdbId ?? "none");
-        var safeEpTitle = SanitizeFilename(episodeTitle ?? "");
-        var seriesFolder = Path.Combine(libraryPath, $"{safeSeries} ({seriesYear}) [imdbid-{safeImdb}]");
+        if (string.IsNullOrWhiteSpace(safeSeries))
+        {
+            return BadRequest(new { Error = "SeriesTitle does not contain a usable folder name." });
+        }
+
+        var safeYear = NormalizeYear(seriesYear);
+        var safeImdb = NormalizeImdbId(seriesImdbId);
+        var safeEpTitle = SanitizeFilename(episodeTitle ?? string.Empty);
+
+        var seriesFolderName = ResolveMediaFolderName(libraryPath, safeSeries, safeYear, safeImdb);
+        var seriesFolder = Path.Combine(libraryPath, seriesFolderName);
         var seasonFolder = Path.Combine(seriesFolder, $"Season {season:D2}");
         var fileName = $"{safeSeries} S{season:D2}E{episode:D2} {safeEpTitle}".Trim() + ".mkv";
         var destMkv = Path.Combine(seasonFolder, fileName);
@@ -309,10 +329,73 @@ public class UploadController : ControllerBase
         return virtualFolders.SelectMany(f => f.Locations).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
     }
 
+    private static string ResolveMediaFolderName(string libraryPath, string safeName, string safeYear, string safeImdb)
+    {
+        var constructed = safeName;
+        if (safeYear.Length > 0)
+        {
+            constructed += $" ({safeYear})";
+        }
+
+        if (safeImdb.Length > 0)
+        {
+            constructed += $" [imdbid-{safeImdb}]";
+        }
+
+        // When the client has no metadata, reuse an existing folder for the same title so
+        // repeated uploads don't create a second, split library entry.
+        if (safeYear.Length > 0 || safeImdb.Length > 0 || !Directory.Exists(libraryPath))
+        {
+            return constructed;
+        }
+
+        foreach (var directory in Directory.EnumerateDirectories(libraryPath))
+        {
+            var name = Path.GetFileName(directory);
+            if (name != null && MatchesNameWithOptionalMetadata(name, safeName))
+            {
+                return name;
+            }
+        }
+
+        return constructed;
+    }
+
+    private static bool MatchesNameWithOptionalMetadata(string folderName, string name)
+    {
+        return string.Equals(folderName, name, StringComparison.OrdinalIgnoreCase)
+            || folderName.StartsWith(name + " (", StringComparison.OrdinalIgnoreCase)
+            || folderName.StartsWith(name + " [", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string SanitizeFilename(string name)
     {
         var invalid = Path.GetInvalidFileNameChars();
-        return string.Concat(name.Select(c => invalid.Contains(c) ? '_' : c)).Trim();
+        var cleaned = string.Concat(name.Select(c => invalid.Contains(c) ? '_' : c)).Trim();
+
+        // "." and ".." are legal file names but would traverse directories once combined with a path.
+        return cleaned is "." or ".." ? "_" : cleaned;
+    }
+
+    private static string NormalizeYear(string? year)
+    {
+        var value = SanitizeFilename(year ?? string.Empty);
+        return value.Length == 4 && value.All(c => c >= '0' && c <= '9') ? value : string.Empty;
+    }
+
+    private static string NormalizeImdbId(string? imdbId)
+    {
+        var value = SanitizeFilename(imdbId ?? string.Empty);
+        if (value.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        return value.StartsWith("tt", StringComparison.OrdinalIgnoreCase)
+            && value.Length > 2
+            && value.Skip(2).All(c => c >= '0' && c <= '9')
+                ? value.ToLowerInvariant()
+                : string.Empty;
     }
 
     private static void CleanUpTemp(string path)
