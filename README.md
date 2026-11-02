@@ -7,7 +7,7 @@ A Jellyfin plugin that enables seamless direct streaming uploads and auto-organi
 1. In your Jellyfin server, go to **Dashboard → Plugins → Repositories**
 2. Click **+** and add:
    - **Name:** `FileToRemux`
-   - **URL:** `https://garrettbutchko.github.io/Jellyfin.Plugin.FileToRemux/manifest.json`
+   - **URL:** `https://garrettbutchko.github.io/jellyfin-plugin-fileToRemux/manifest.json`
 3. Go to **Catalog**, find **FileToRemux**, and click **Install**
 4. Restart Jellyfin when prompted
 
