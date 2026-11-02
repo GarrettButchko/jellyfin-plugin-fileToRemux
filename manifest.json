@@ -8,6 +8,14 @@
     "owner": "GarrettButchko",
     "versions": [
       {
+        "version": "1.0.2.0",
+        "targetAbi": "10.9.0.0",
+        "sourceUrl": "https://github.com/GarrettButchko/Jellyfin.Plugin.FileToRemux/releases/download/v1.0.2/Jellyfin.Plugin.FileToRemux_1.0.2.zip",
+        "checksum": "cd9a8dc59a028a1a97c2e34a33c77473",
+        "changelog": "See release notes on GitHub.",
+        "timestamp": "2026-11-02T22:06:41Z"
+      },
+      {
         "version": "1.0.1.2",
         "targetAbi": "10.9.0.0",
         "sourceUrl": "https://github.com/GarrettButchko/Jellyfin.Plugin.FileToRemux/releases/download/v1.0.1.2/Jellyfin.Plugin.FileToRemux_1.0.1.2.zip",
