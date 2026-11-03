@@ -11,13 +11,13 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.FileToRemux;
 
 /// <summary>
-/// Removes upload temp files left behind by interrupted uploads. Cleanup runs once when the
-/// server starts, because on Windows a temp file can stay locked by a request that outlived
-/// the upload and cannot reliably be removed while that handle is still open.
+/// Removes upload temp and part files left behind by interrupted uploads that are older than 7 days,
+/// or legacy .uploading.tmp files.
 /// </summary>
 public sealed class StaleTempCleanupService : BackgroundService
 {
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan StaleAgeThreshold = TimeSpan.FromDays(7);
 
     private readonly ILibraryManager _libraryManager;
     private readonly ILogger<StaleTempCleanupService> _logger;
@@ -44,8 +44,6 @@ public sealed class StaleTempCleanupService : BackgroundService
         }
 
         _logger.LogInformation("FileToRemux: Starting upload temp cleanup");
-
-        // Nothing can still be uploading across a server restart, so every temp file is stale.
         RunStartupScan();
     }
 
@@ -53,6 +51,7 @@ public sealed class StaleTempCleanupService : BackgroundService
     {
         var candidates = 0;
         var removed = 0;
+        var now = DateTime.UtcNow;
 
         foreach (var root in GetLibraryRoots())
         {
@@ -65,6 +64,7 @@ public sealed class StaleTempCleanupService : BackgroundService
                     AttributesToSkip = FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint
                 };
 
+                // Legacy tmp files
                 foreach (var file in Directory.EnumerateFiles(root, "*.uploading.tmp", options))
                 {
                     candidates++;
@@ -72,6 +72,29 @@ public sealed class StaleTempCleanupService : BackgroundService
                     {
                         removed++;
                     }
+                }
+
+                // Resumable part files older than 7 days and not currently in active transfer
+                foreach (var file in Directory.EnumerateFiles(root, "*.upload.part", options))
+                {
+                    if (TempFileTracker.IsActive(file))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var lastWrite = File.GetLastWriteTimeUtc(file);
+                        if (now - lastWrite > StaleAgeThreshold)
+                        {
+                            candidates++;
+                            if (TryDelete(file))
+                            {
+                                removed++;
+                            }
+                        }
+                    }
+                    catch { }
                 }
             }
             catch (Exception ex)
@@ -116,7 +139,6 @@ public sealed class StaleTempCleanupService : BackgroundService
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Still open; it will be handled on the next server restart.
             _logger.LogDebug(ex, "FileToRemux: Stale temp file is still locked {Path}", file);
             return false;
         }

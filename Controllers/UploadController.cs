@@ -15,13 +15,15 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.FileToRemux.Controllers;
 
 /// <summary>
-/// API controller providing status handshake, library discovery, and streaming MKV uploads for FileToRemux.
+/// API controller providing status handshake, library discovery, progress checking,
+/// and resumable streaming MKV uploads for FileToRemux.
 /// </summary>
 [ApiController]
 [Route("FileToRemux")]
 [Produces(MediaTypeNames.Application.Json)]
 public class UploadController : ControllerBase
 {
+    private const string UploadPartExtension = ".upload.part";
     private readonly ILibraryManager _libraryManager;
     private readonly IServerConfigurationManager _configManager;
     private readonly ILogger<UploadController> _logger;
@@ -40,9 +42,8 @@ public class UploadController : ControllerBase
     }
 
     /// <summary>
-    /// Status check endpoint used by the FileToRemux macOS app to detect if the plugin is installed.
+    /// Status check endpoint used by the FileToRemux macOS app.
     /// </summary>
-    /// <returns>Plugin metadata and capabilities.</returns>
     [HttpGet("Status")]
     public ActionResult<object> GetStatus()
     {
@@ -57,12 +58,13 @@ public class UploadController : ControllerBase
             Installed = true,
             Version = version,
             DirectUploadsEnabled = config?.EnableDirectUploads ?? true,
-            ServerName = _configManager.Configuration.ServerName ?? "Jellyfin"
+            ServerName = _configManager.Configuration.ServerName ?? "Jellyfin",
+            SupportsResumableUploads = true
         });
     }
 
     /// <summary>
-    /// Returns available Movie and TV libraries configured on this Jellyfin server, along with their physical server locations.
+    /// Returns available Movie and TV libraries configured on this Jellyfin server.
     /// </summary>
     [HttpGet("Libraries")]
     [Authorize]
@@ -82,7 +84,110 @@ public class UploadController : ControllerBase
     }
 
     /// <summary>
+    /// Checks the current upload progress/offset for a movie or TV episode on the server.
+    /// </summary>
+    [HttpGet("Upload/Progress")]
+    [Authorize]
+    public ActionResult<object> GetUploadProgress(
+        [FromQuery] string? title,
+        [FromQuery] string? year,
+        [FromQuery] string? imdbId,
+        [FromQuery] string? seriesTitle,
+        [FromQuery] string? seriesYear,
+        [FromQuery] string? seriesImdbId,
+        [FromQuery] int? season,
+        [FromQuery] int? episode,
+        [FromQuery] string? episodeTitle,
+        [FromQuery] string? libraryId,
+        [FromQuery] string? serverPath)
+    {
+        bool isMovie = !string.IsNullOrWhiteSpace(title);
+        bool isTv = !string.IsNullOrWhiteSpace(seriesTitle);
+
+        if (!isMovie && !isTv)
+        {
+            return BadRequest(new { Error = "Either title or seriesTitle is required." });
+        }
+
+        string destMkv;
+        string partPath;
+
+        if (isMovie)
+        {
+            var libraryPath = ResolveLibraryPath(libraryId, serverPath, CollectionTypeOptions.movies);
+            if (libraryPath == null)
+            {
+                return BadRequest(new { Error = "Could not resolve movie library path." });
+            }
+
+            var safeTitle = SanitizeFilename(title!);
+            var safeYear = NormalizeYear(year);
+            var safeImdb = NormalizeImdbId(imdbId);
+            var folderName = ResolveMediaFolderName(libraryPath, safeTitle, safeYear, safeImdb);
+
+            var movieFolder = Path.Combine(libraryPath, folderName);
+            destMkv = Path.Combine(movieFolder, $"{folderName}.mkv");
+            partPath = Path.Combine(movieFolder, $"{folderName}.mkv{UploadPartExtension}");
+        }
+        else
+        {
+            if (season == null || episode == null || season < 0 || episode < 0)
+            {
+                return BadRequest(new { Error = "Valid season and episode numbers are required for TV episode." });
+            }
+
+            var libraryPath = ResolveLibraryPath(libraryId, serverPath, CollectionTypeOptions.tvshows);
+            if (libraryPath == null)
+            {
+                return BadRequest(new { Error = "Could not resolve TV library path." });
+            }
+
+            var safeSeries = SanitizeFilename(seriesTitle!);
+            var safeYear = NormalizeYear(seriesYear);
+            var safeImdb = NormalizeImdbId(seriesImdbId);
+            var safeEpTitle = SanitizeFilename(episodeTitle ?? string.Empty);
+
+            var seriesFolderName = ResolveMediaFolderName(libraryPath, safeSeries, safeYear, safeImdb);
+            var seriesFolder = Path.Combine(libraryPath, seriesFolderName);
+            var seasonFolder = Path.Combine(seriesFolder, $"Season {season.Value:D2}");
+            var fileName = $"{safeSeries} S{season.Value:D2}E{episode.Value:D2} {safeEpTitle}".Trim() + ".mkv";
+
+            destMkv = Path.Combine(seasonFolder, fileName);
+            partPath = Path.Combine(seasonFolder, $"{fileName}{UploadPartExtension}");
+        }
+
+        if (System.IO.File.Exists(destMkv))
+        {
+            var fi = new FileInfo(destMkv);
+            return Ok(new
+            {
+                Completed = true,
+                Offset = fi.Length,
+                Path = destMkv
+            });
+        }
+
+        if (System.IO.File.Exists(partPath))
+        {
+            var fi = new FileInfo(partPath);
+            return Ok(new
+            {
+                Completed = false,
+                Offset = fi.Length,
+                PartPath = partPath
+            });
+        }
+
+        return Ok(new
+        {
+            Completed = false,
+            Offset = 0L
+        });
+    }
+
+    /// <summary>
     /// Streams an MKV movie directly to the destination library folder and refreshes the library item.
+    /// Supports resumable uploads via the offset query parameter.
     /// </summary>
     [HttpPost("Upload/Movie")]
     [Authorize]
@@ -94,7 +199,9 @@ public class UploadController : ControllerBase
         [FromQuery] string? imdbId,
         [FromQuery] string? libraryId,
         [FromQuery] string? serverPath,
-        CancellationToken cancellationToken)
+        [FromQuery] long offset = 0,
+        [FromQuery] long totalBytes = 0,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(title))
         {
@@ -119,87 +226,26 @@ public class UploadController : ControllerBase
 
         var movieFolder = Path.Combine(libraryPath, folderName);
         var destMkv = Path.Combine(movieFolder, $"{folderName}.mkv");
+        var partPath = Path.Combine(movieFolder, $"{folderName}.mkv{UploadPartExtension}");
 
-        _logger.LogInformation("FileToRemux: Receiving movie upload for {Title} ({Year}) into {Destination}", title, year ?? "unknown", destMkv);
+        _logger.LogInformation(
+            "FileToRemux: Receiving movie upload for {Title} ({Year}) into {Destination} (offset: {Offset}, total: {Total})",
+            title, year ?? "unknown", destMkv, offset, totalBytes);
 
         Directory.CreateDirectory(movieFolder);
 
         if (System.IO.File.Exists(destMkv))
         {
             _logger.LogWarning("FileToRemux: Movie upload rejected; destination already exists at {Path}", destMkv);
-            return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
+            return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv, Completed = true });
         }
 
-        // A unique name per attempt means a stale temp file that is still locked by an
-        // in-flight request can no longer block a retry from starting.
-        var tempPath = Path.Combine(movieFolder, $"{folderName}.mkv.{Guid.NewGuid():N}.uploading.tmp");
-        TempFileTracker.RegisterActive(tempPath);
-
-        try
-        {
-            await using (var fileStream = new FileStream(
-                tempPath,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                bufferSize: 1024 * 1024,
-                useAsync: true))
-            {
-                await Request.Body.CopyToAsync(fileStream, cancellationToken);
-            }
-
-            // Another upload may have finished while this one was streaming.
-            if (System.IO.File.Exists(destMkv))
-            {
-                _logger.LogWarning("FileToRemux: Movie upload rejected after streaming; destination already exists at {Path}", destMkv);
-                CleanUpTemp(tempPath);
-                return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
-            }
-
-            System.IO.File.Move(tempPath, destMkv);
-            _logger.LogInformation("FileToRemux: Upload completed. Saved to {Path}", destMkv);
-
-            // Queue a library scan for the new folder
-            _ = Task.Run(() =>
-            {
-                try
-                {
-                    _libraryManager.QueueLibraryScan();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "FileToRemux: Error requesting library scan");
-                }
-            });
-
-            return Ok(new
-            {
-                Status = "Success",
-                Path = destMkv,
-                Title = title,
-                Year = year ?? string.Empty
-            });
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogWarning("FileToRemux: Upload canceled for {Title}", title);
-            CleanUpTemp(tempPath);
-            return StatusCode(StatusCodes.Status499ClientClosedRequest);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "FileToRemux: Upload failed for {Title}", title);
-            CleanUpTemp(tempPath);
-            return StatusCode(StatusCodes.Status500InternalServerError, new { Error = ex.Message });
-        }
-        finally
-        {
-            TempFileTracker.UnregisterActive(tempPath);
-        }
+        return await ProcessStreamingUploadAsync(partPath, destMkv, offset, totalBytes, title, year, cancellationToken);
     }
 
     /// <summary>
     /// Streams an MKV episode directly to the TV series season folder and refreshes the library item.
+    /// Supports resumable uploads via the offset query parameter.
     /// </summary>
     [HttpPost("Upload/Episode")]
     [Authorize]
@@ -214,7 +260,9 @@ public class UploadController : ControllerBase
         [FromQuery] string? episodeTitle,
         [FromQuery] string? libraryId,
         [FromQuery] string? serverPath,
-        CancellationToken cancellationToken)
+        [FromQuery] long offset = 0,
+        [FromQuery] long totalBytes = 0,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(seriesTitle))
         {
@@ -247,46 +295,103 @@ public class UploadController : ControllerBase
         var seasonFolder = Path.Combine(seriesFolder, $"Season {season:D2}");
         var fileName = $"{safeSeries} S{season:D2}E{episode:D2} {safeEpTitle}".Trim() + ".mkv";
         var destMkv = Path.Combine(seasonFolder, fileName);
+        var partPath = Path.Combine(seasonFolder, $"{fileName}{UploadPartExtension}");
 
-        _logger.LogInformation("FileToRemux: Receiving episode upload {FileName} into {Destination}", fileName, destMkv);
+        _logger.LogInformation(
+            "FileToRemux: Receiving episode upload {FileName} into {Destination} (offset: {Offset}, total: {Total})",
+            fileName, destMkv, offset, totalBytes);
 
         Directory.CreateDirectory(seasonFolder);
 
         if (System.IO.File.Exists(destMkv))
         {
             _logger.LogWarning("FileToRemux: Episode upload rejected; destination already exists at {Path}", destMkv);
-            return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
+            return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv, Completed = true });
         }
 
-        // A unique name per attempt means a stale temp file that is still locked by an
-        // in-flight request can no longer block a retry from starting.
-        var tempPath = Path.Combine(seasonFolder, $"{fileName}.{Guid.NewGuid():N}.uploading.tmp");
-        TempFileTracker.RegisterActive(tempPath);
+        return await ProcessStreamingUploadAsync(partPath, destMkv, offset, totalBytes, fileName, null, cancellationToken);
+    }
+
+    private async Task<IActionResult> ProcessStreamingUploadAsync(
+        string partPath,
+        string destMkv,
+        long offset,
+        long totalBytes,
+        string titleOrFile,
+        string? year,
+        CancellationToken cancellationToken)
+    {
+        TempFileTracker.RegisterActive(partPath);
 
         try
         {
+            FileMode mode;
+            if (offset == 0)
+            {
+                mode = FileMode.Create;
+            }
+            else
+            {
+                if (!System.IO.File.Exists(partPath))
+                {
+                    _logger.LogWarning("FileToRemux: Resume requested at offset {Offset} but part file does not exist {PartPath}", offset, partPath);
+                    return Conflict(new { Error = "Part file does not exist on server.", ServerOffset = 0L });
+                }
+
+                var existingLen = new FileInfo(partPath).Length;
+                if (existingLen != offset)
+                {
+                    _logger.LogWarning("FileToRemux: Offset mismatch for {Path}. Client sent {ClientOffset}, server has {ServerOffset}",
+                        partPath, offset, existingLen);
+                    return Conflict(new { Error = "Offset mismatch.", ServerOffset = existingLen });
+                }
+
+                mode = FileMode.Open;
+            }
+
             await using (var fileStream = new FileStream(
-                tempPath,
-                FileMode.Create,
-                FileAccess.Write,
+                partPath,
+                mode,
+                FileAccess.ReadWrite,
                 FileShare.None,
                 bufferSize: 1024 * 1024,
                 useAsync: true))
             {
+                if (offset > 0)
+                {
+                    fileStream.Seek(offset, SeekOrigin.Begin);
+                }
+
                 await Request.Body.CopyToAsync(fileStream, cancellationToken);
+                await fileStream.FlushAsync(cancellationToken);
             }
 
-            // Another upload may have finished while this one was streaming.
+            // Check if final destination was created concurrently
             if (System.IO.File.Exists(destMkv))
             {
-                _logger.LogWarning("FileToRemux: Episode upload rejected after streaming; destination already exists at {Path}", destMkv);
-                CleanUpTemp(tempPath);
+                _logger.LogWarning("FileToRemux: Upload destination already exists at {Path}", destMkv);
+                CleanUpFile(partPath);
                 return Conflict(new { Error = "A file with this name already exists on the server.", Path = destMkv });
             }
 
-            System.IO.File.Move(tempPath, destMkv);
-            _logger.LogInformation("FileToRemux: Episode upload completed. Saved to {Path}", destMkv);
+            // Verify final length if totalBytes was provided
+            var finalPartLen = new FileInfo(partPath).Length;
+            if (totalBytes > 0 && finalPartLen < totalBytes)
+            {
+                _logger.LogWarning("FileToRemux: Upload ended short of totalBytes. Expected {Total}, got {Actual}", totalBytes, finalPartLen);
+                return Ok(new
+                {
+                    Status = "Partial",
+                    Offset = finalPartLen,
+                    TotalBytes = totalBytes
+                });
+            }
 
+            // Atomic rename to final MKV
+            System.IO.File.Move(partPath, destMkv);
+            _logger.LogInformation("FileToRemux: Upload completed successfully. Saved to {Path} ({Size} bytes)", destMkv, finalPartLen);
+
+            // Queue a library scan for the new folder
             _ = Task.Run(() =>
             {
                 try
@@ -303,32 +408,38 @@ public class UploadController : ControllerBase
             {
                 Status = "Success",
                 Path = destMkv,
-                Series = seriesTitle,
-                Season = season,
-                Episode = episode
+                Title = titleOrFile,
+                Year = year ?? string.Empty,
+                Size = finalPartLen
             });
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("FileToRemux: Episode upload canceled for {FileName}", fileName);
-            CleanUpTemp(tempPath);
-            return StatusCode(StatusCodes.Status499ClientClosedRequest);
+            long savedOffset = 0;
+            if (System.IO.File.Exists(partPath))
+            {
+                savedOffset = new FileInfo(partPath).Length;
+            }
+            _logger.LogInformation("FileToRemux: Upload stream paused/interrupted for {Title}. Preserved {Bytes} bytes on server.", titleOrFile, savedOffset);
+            return StatusCode(StatusCodes.Status499ClientClosedRequest, new
+            {
+                Status = "Paused",
+                Offset = savedOffset
+            });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "FileToRemux: Episode upload failed for {FileName}", fileName);
-            CleanUpTemp(tempPath);
+            _logger.LogError(ex, "FileToRemux: Upload failed for {Title}", titleOrFile);
             return StatusCode(StatusCodes.Status500InternalServerError, new { Error = ex.Message });
         }
         finally
         {
-            TempFileTracker.UnregisterActive(tempPath);
+            TempFileTracker.UnregisterActive(partPath);
         }
     }
 
     private string? ResolveLibraryPath(string? libraryId, string? serverPath, CollectionTypeOptions preferredType)
     {
-        // 1. Direct explicit server path if provided
         if (!string.IsNullOrWhiteSpace(serverPath))
         {
             return serverPath.Trim();
@@ -336,7 +447,6 @@ public class UploadController : ControllerBase
 
         var virtualFolders = _libraryManager.GetVirtualFolders();
 
-        // 2. Specific library ID or Name match
         if (!string.IsNullOrEmpty(libraryId))
         {
             var match = virtualFolders.FirstOrDefault(f =>
@@ -349,7 +459,6 @@ public class UploadController : ControllerBase
             }
         }
 
-        // 3. Preferred collection type match (e.g. movies or tvshows)
         var typed = virtualFolders.FirstOrDefault(f => f.CollectionType == preferredType);
         var typedLocation = typed?.Locations.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
         if (typedLocation != null)
@@ -357,7 +466,6 @@ public class UploadController : ControllerBase
             return typedLocation;
         }
 
-        // 4. Any folder with a location
         return virtualFolders.SelectMany(f => f.Locations).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
     }
 
@@ -379,10 +487,6 @@ public class UploadController : ControllerBase
             return constructed;
         }
 
-        // Reuse an existing folder for the same title so repeated uploads (and retries after an
-        // interrupted upload) don't create a second, split library entry. Older plugin versions
-        // wrote folders such as "Title (2020) [imdbid-]" even when no IMDb id was known, so a
-        // stricter name match would strand their temp files in a folder nobody uploads to again.
         string? compatible = null;
         foreach (var directory in Directory.EnumerateDirectories(libraryPath))
         {
@@ -417,9 +521,6 @@ public class UploadController : ControllerBase
         return compatible ?? constructed;
     }
 
-    /// <summary>
-    /// Splits "Name (Year) [imdbid-tt123]" into its parts. Missing metadata is returned empty.
-    /// </summary>
     private static bool TryParseMediaFolderName(string folderName, out string name, out string year, out string imdb)
     {
         name = folderName.Trim();
@@ -454,8 +555,6 @@ public class UploadController : ControllerBase
     {
         var invalid = Path.GetInvalidFileNameChars();
         var cleaned = string.Concat(name.Select(c => invalid.Contains(c) ? '_' : c)).Trim();
-
-        // "." and ".." are legal file names but would traverse directories once combined with a path.
         return cleaned is "." or ".." ? "_" : cleaned;
     }
 
@@ -480,7 +579,7 @@ public class UploadController : ControllerBase
                 : string.Empty;
     }
 
-    private static void CleanUpTemp(string path)
+    private static void CleanUpFile(string path)
     {
         try
         {
