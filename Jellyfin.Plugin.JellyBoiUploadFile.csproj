@@ -5,12 +5,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <AssemblyName>Jellyfin.Plugin.JellyboiFileUpload</AssemblyName>
-    <RootNamespace>Jellyfin.Plugin.JellyboiFileUpload</RootNamespace>
-    <Version>1.0.7</Version>
+    <AssemblyName>Jellyfin.Plugin.JellyBoiUploadFile</AssemblyName>
+    <RootNamespace>Jellyfin.Plugin.JellyBoiUploadFile</RootNamespace>
+    <Version>1.0.8</Version>
     <Authors>Garrett Butchko</Authors>
-    <Company>FileToRemux</Company>
-    <Description>Direct high-speed remux streaming and auto-organization plugin for Jellyfin.</Description>
+    <Company>JellyBoi</Company>
+    <Description>Direct high-speed streaming and auto-organization plugin for Jellyfin.</Description>
   </PropertyGroup>
 
   <ItemGroup>

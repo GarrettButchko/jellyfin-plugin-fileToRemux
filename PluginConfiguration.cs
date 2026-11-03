@@ -1,14 +1,14 @@
 using MediaBrowser.Model.Plugins;
 
-namespace Jellyfin.Plugin.JellyboiFileUpload;
+namespace Jellyfin.Plugin.JellyBoiUploadFile;
 
 /// <summary>
-/// Plugin configuration for FileToRemux.
+/// Plugin configuration for JellyBoi File Upload.
 /// </summary>
 public class PluginConfiguration : BasePluginConfiguration
 {
     /// <summary>
-    /// Gets or sets a value indicating whether direct uploads from FileToRemux are enabled.
+    /// Gets or sets a value indicating whether direct uploads from JellyBoi / FileToRemux are enabled.
     /// </summary>
     public bool EnableDirectUploads { get; set; } = true;
 

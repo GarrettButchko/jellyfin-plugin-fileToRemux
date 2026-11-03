@@ -1,14 +1,14 @@
-# Jellyfin.Plugin.JellyboiFileUpload
+# Jellyfin.Plugin.JellyBoiUploadFile
 
-A Jellyfin plugin that enables seamless direct streaming uploads and auto-organization from [FileToRemux](https://filetoremux.com).
+A Jellyfin plugin that enables seamless direct streaming uploads and auto-organization for [JellyBoi](https://github.com/GarrettButchko/JellyBoi) and [FileToRemux](https://filetoremux.com).
 
 ## Installation via Plugin Repository (Recommended)
 
 1. In your Jellyfin server, go to **Dashboard → Plugins → Repositories**
 2. Click **+** and add:
-   - **Name:** `FileToRemux`
-   - **URL:** `https://garrettbutchko.github.io/jellyfin-plugin-fileToRemux/manifest.json`
-3. Go to **Catalog**, find **FileToRemux**, and click **Install**
+   - **Name:** `JellyBoi Upload File`
+   - **URL:** `https://garrettbutchko.github.io/jellyfin_plugin_jellyboiFileUpload/manifest.json`
+3. Go to **Catalog**, find **JellyBoi Upload File**, and click **Install**
 4. Restart Jellyfin when prompted
 
 Jellyfin will automatically notify you of future updates.
@@ -33,12 +33,12 @@ dotnet build
 
 ### Releasing a new version
 
-1. Bump the `<Version>` in `Jellyfin.Plugin.JellyboiFileUpload.csproj`
+1. Bump the `<Version>` in `Jellyfin.Plugin.JellyBoiUploadFile.csproj`
 2. Commit and push
 3. Tag and push the tag:
    ```bash
-   git tag v1.0.1
-   git push origin v1.0.1
+   git tag v1.0.9
+   git push origin v1.0.9
    ```
 
 GitHub Actions will automatically:

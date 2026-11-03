@@ -12,15 +12,17 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.JellyboiFileUpload.Controllers;
+namespace Jellyfin.Plugin.JellyBoiUploadFile.Controllers;
 
 /// <summary>
 /// API controller providing status handshake, library discovery, progress checking,
-/// and resumable streaming MKV uploads for FileToRemux.
+/// and resumable streaming MKV uploads for JellyBoi and FileToRemux.
 /// </summary>
 [ApiController]
-[Route("FileToRemux")]
+[Route("JellyBoiUploadFile")]
+[Route("JellyBoi.Upload.File")]
 [Route("JellyboiFileUpload")]
+[Route("FileToRemux")]
 [Produces(MediaTypeNames.Application.Json)]
 public class UploadController : ControllerBase
 {
@@ -43,7 +45,7 @@ public class UploadController : ControllerBase
     }
 
     /// <summary>
-    /// Status check endpoint used by the FileToRemux macOS app.
+    /// Status check endpoint used by JellyBoi and FileToRemux.
     /// </summary>
     [HttpGet("Status")]
     public ActionResult<object> GetStatus()
@@ -55,7 +57,7 @@ public class UploadController : ControllerBase
             : (pluginVersion.Revision > 0 ? pluginVersion.ToString() : pluginVersion.ToString(3));
         return Ok(new
         {
-            Plugin = "Jellyboi File Upload",
+            Plugin = "JellyBoi Upload File",
             Installed = true,
             Version = version,
             DirectUploadsEnabled = config?.EnableDirectUploads ?? true,
