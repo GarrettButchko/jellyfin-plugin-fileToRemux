@@ -37,8 +37,8 @@ dotnet build
 2. Commit and push
 3. Tag and push the tag:
    ```bash
-   git tag v1.0.9
-   git push origin v1.0.9
+   git tag v1.0.10
+   git push origin v1.0.10
    ```
 
 GitHub Actions will automatically:

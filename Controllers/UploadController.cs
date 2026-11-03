@@ -324,10 +324,15 @@ public class UploadController : ControllerBase
         string? year,
         CancellationToken cancellationToken)
     {
-        TempFileTracker.RegisterActive(partPath);
+        // Acquire coordination lock for this part file. If a previous request for this file is still alive,
+        // it signals cancellation on the old stream and waits for it to release.
+        using var transferScope = await TempFileTracker.AcquireTransferLockAsync(partPath, cancellationToken);
+        var effectiveToken = TempFileTracker.GetTransferToken(partPath, cancellationToken);
 
         try
         {
+            effectiveToken.ThrowIfCancellationRequested();
+
             FileMode mode;
             if (offset == 0)
             {
@@ -352,21 +357,15 @@ public class UploadController : ControllerBase
                 mode = FileMode.Open;
             }
 
-            await using (var fileStream = new FileStream(
-                partPath,
-                mode,
-                FileAccess.ReadWrite,
-                FileShare.None,
-                bufferSize: 1024 * 1024,
-                useAsync: true))
+            await using (var fileStream = await OpenFileStreamWithRetryAsync(partPath, mode, effectiveToken))
             {
                 if (offset > 0)
                 {
                     fileStream.Seek(offset, SeekOrigin.Begin);
                 }
 
-                await Request.Body.CopyToAsync(fileStream, cancellationToken);
-                await fileStream.FlushAsync(cancellationToken);
+                await Request.Body.CopyToAsync(fileStream, effectiveToken);
+                await fileStream.FlushAsync(effectiveToken);
             }
 
             // Check if final destination was created concurrently
@@ -381,7 +380,7 @@ public class UploadController : ControllerBase
             var finalPartLen = new FileInfo(partPath).Length;
             if (totalBytes > 0 && finalPartLen < totalBytes)
             {
-                _logger.LogWarning("FileToRemux: Upload ended short of totalBytes. Expected {Total}, got {Actual}", totalBytes, finalPartLen);
+                _logger.LogInformation("FileToRemux: Upload stream paused/ended short of totalBytes. Expected {Total}, got {Actual}", totalBytes, finalPartLen);
                 return Ok(new
                 {
                     Status = "Partial",
@@ -391,7 +390,7 @@ public class UploadController : ControllerBase
             }
 
             // Atomic rename to final MKV
-            System.IO.File.Move(partPath, destMkv);
+            MoveFileWithRetry(partPath, destMkv);
             _logger.LogInformation("FileToRemux: Upload completed successfully. Saved to {Path} ({Size} bytes)", destMkv, finalPartLen);
 
             // Queue a library scan for the new folder
@@ -416,12 +415,12 @@ public class UploadController : ControllerBase
                 Size = finalPartLen
             });
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (IsCancellationOrClientDisconnect(ex, effectiveToken))
         {
             long savedOffset = 0;
             if (System.IO.File.Exists(partPath))
             {
-                savedOffset = new FileInfo(partPath).Length;
+                try { savedOffset = new FileInfo(partPath).Length; } catch { }
             }
             _logger.LogInformation("FileToRemux: Upload stream paused/interrupted for {Title}. Preserved {Bytes} bytes on server.", titleOrFile, savedOffset);
             return StatusCode(StatusCodes.Status499ClientClosedRequest, new
@@ -435,10 +434,86 @@ public class UploadController : ControllerBase
             _logger.LogError(ex, "FileToRemux: Upload failed for {Title}", titleOrFile);
             return StatusCode(StatusCodes.Status500InternalServerError, new { Error = ex.Message });
         }
-        finally
+    }
+
+    private static async Task<FileStream> OpenFileStreamWithRetryAsync(string path, FileMode mode, CancellationToken ct)
+    {
+        const int maxAttempts = 10;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            TempFileTracker.UnregisterActive(partPath);
+            try
+            {
+                return new FileStream(
+                    path,
+                    mode,
+                    FileAccess.ReadWrite,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    bufferSize: 1024 * 1024,
+                    useAsync: true);
+            }
+            catch (IOException) when (attempt < maxAttempts && !ct.IsCancellationRequested)
+            {
+                await Task.Delay(200 * attempt, ct).ConfigureAwait(false);
+            }
         }
+
+        // Final attempt without catching IOException
+        return new FileStream(
+            path,
+            mode,
+            FileAccess.ReadWrite,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 1024 * 1024,
+            useAsync: true);
+    }
+
+    private static void MoveFileWithRetry(string source, string destination)
+    {
+        const int maxAttempts = 5;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                System.IO.File.Move(source, destination, overwrite: true);
+                return;
+            }
+            catch (IOException) when (attempt < maxAttempts)
+            {
+                Thread.Sleep(200 * attempt);
+            }
+        }
+        System.IO.File.Move(source, destination, overwrite: true);
+    }
+
+    private static bool IsCancellationOrClientDisconnect(Exception ex, CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested || ex is OperationCanceledException)
+        {
+            return true;
+        }
+
+        // Inspect inner exceptions for socket reset / client disconnect
+        for (var current = ex; current != null; current = current.InnerException)
+        {
+            var name = current.GetType().Name;
+            if (name.Contains("ConnectionReset", StringComparison.OrdinalIgnoreCase) ||
+                name.Contains("ClientReset", StringComparison.OrdinalIgnoreCase) ||
+                name.Contains("SocketException", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var msg = current.Message;
+            if (msg.Contains("broken pipe", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("connection reset", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("forcibly closed", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("aborted", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private string? ResolveLibraryPath(string? libraryId, string? serverPath, CollectionTypeOptions preferredType)
