@@ -2,7 +2,7 @@ using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace Jellyfin.Plugin.FileToRemux;
+namespace Jellyfin.Plugin.JellyboiFileUpload;
 
 /// <summary>
 /// Registers plugin background services with the Jellyfin host.

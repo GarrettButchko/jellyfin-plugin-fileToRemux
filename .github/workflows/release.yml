@@ -28,23 +28,23 @@ jobs:
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
       - name: Build plugin
-        run: dotnet publish Jellyfin.Plugin.FileToRemux.csproj -c Release -o ./publish -p:Version=${{ steps.version.outputs.VERSION }}
+        run: dotnet publish Jellyfin.Plugin.JellyboiFileUpload.csproj -c Release -o ./publish -p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Zip plugin
         run: |
           cd publish
-          zip -j ../Jellyfin.Plugin.FileToRemux_${{ steps.version.outputs.VERSION }}.zip Jellyfin.Plugin.FileToRemux.dll
+          zip -j ../Jellyfin.Plugin.JellyboiFileUpload_${{ steps.version.outputs.VERSION }}.zip Jellyfin.Plugin.JellyboiFileUpload.dll
 
       - name: Compute MD5 checksum
         id: checksum
         run: |
-          MD5=$(md5sum Jellyfin.Plugin.FileToRemux_${{ steps.version.outputs.VERSION }}.zip | awk '{print $1}')
+          MD5=$(md5sum Jellyfin.Plugin.JellyboiFileUpload_${{ steps.version.outputs.VERSION }}.zip | awk '{print $1}')
           echo "MD5=$MD5" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release and upload zip
         uses: softprops/action-gh-release@v2
         with:
-          files: Jellyfin.Plugin.FileToRemux_${{ steps.version.outputs.VERSION }}.zip
+          files: Jellyfin.Plugin.JellyboiFileUpload_${{ steps.version.outputs.VERSION }}.zip
           generate_release_notes: true
 
       - name: Checkout gh-pages branch
@@ -60,7 +60,7 @@ jobs:
           MD5: ${{ steps.checksum.outputs.MD5 }}
         run: |
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          SOURCE_URL="https://github.com/GarrettButchko/Jellyfin.Plugin.FileToRemux/releases/download/v${VERSION}/Jellyfin.Plugin.FileToRemux_${VERSION}.zip"
+          SOURCE_URL="https://github.com/GarrettButchko/Jellyfin.Plugin.JellyboiFileUpload/releases/download/v${VERSION}/Jellyfin.Plugin.JellyboiFileUpload_${VERSION}.zip"
 
           # Jellyfin manifests require a 4-part version (e.g. 1.0.1.0). Only append
           # the trailing zero when the tag doesn't already have four components.
@@ -89,7 +89,7 @@ jobs:
               data = [{
                   "category": "General",
                   "guid": "a8f4c281-9f93-4a0b-88a2-11c7d23a49e1",
-                  "name": "FileToRemux",
+                  "name": "Jellyboi File Upload",
                   "description": "Enables seamless direct streaming uploads and auto-organization from FileToRemux.",
                   "overview": "Direct high-speed remux streaming and auto-organization plugin for Jellyfin.",
                   "owner": "GarrettButchko",

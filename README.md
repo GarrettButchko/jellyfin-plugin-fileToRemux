@@ -1,4 +1,4 @@
-# Jellyfin.Plugin.FileToRemux
+# Jellyfin.Plugin.JellyboiFileUpload
 
 A Jellyfin plugin that enables seamless direct streaming uploads and auto-organization from [FileToRemux](https://filetoremux.com).
 
@@ -33,7 +33,7 @@ dotnet build
 
 ### Releasing a new version
 
-1. Bump the `<Version>` in `Jellyfin.Plugin.FileToRemux.csproj`
+1. Bump the `<Version>` in `Jellyfin.Plugin.JellyboiFileUpload.csproj`
 2. Commit and push
 3. Tag and push the tag:
    ```bash

@@ -5,8 +5,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <AssemblyName>Jellyfin.Plugin.FileToRemux</AssemblyName>
-    <RootNamespace>Jellyfin.Plugin.FileToRemux</RootNamespace>
+    <AssemblyName>Jellyfin.Plugin.JellyboiFileUpload</AssemblyName>
+    <RootNamespace>Jellyfin.Plugin.JellyboiFileUpload</RootNamespace>
     <Version>1.0.7</Version>
     <Authors>Garrett Butchko</Authors>
     <Company>FileToRemux</Company>

@@ -12,7 +12,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.FileToRemux.Controllers;
+namespace Jellyfin.Plugin.JellyboiFileUpload.Controllers;
 
 /// <summary>
 /// API controller providing status handshake, library discovery, progress checking,
@@ -20,6 +20,7 @@ namespace Jellyfin.Plugin.FileToRemux.Controllers;
 /// </summary>
 [ApiController]
 [Route("FileToRemux")]
+[Route("JellyboiFileUpload")]
 [Produces(MediaTypeNames.Application.Json)]
 public class UploadController : ControllerBase
 {
@@ -54,7 +55,7 @@ public class UploadController : ControllerBase
             : (pluginVersion.Revision > 0 ? pluginVersion.ToString() : pluginVersion.ToString(3));
         return Ok(new
         {
-            Plugin = "FileToRemux",
+            Plugin = "Jellyboi File Upload",
             Installed = true,
             Version = version,
             DirectUploadsEnabled = config?.EnableDirectUploads ?? true,

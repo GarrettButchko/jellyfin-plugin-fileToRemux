@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 
-namespace Jellyfin.Plugin.FileToRemux;
+namespace Jellyfin.Plugin.JellyboiFileUpload;
 
 /// <summary>
 /// Tracks in-flight upload temp files so the startup cleaner never deletes an active transfer.

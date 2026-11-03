@@ -8,7 +8,7 @@ using MediaBrowser.Controller.Library;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.FileToRemux;
+namespace Jellyfin.Plugin.JellyboiFileUpload;
 
 /// <summary>
 /// Removes upload temp and part files left behind by interrupted uploads that are older than 7 days,

@@ -1,6 +1,6 @@
 using MediaBrowser.Model.Plugins;
 
-namespace Jellyfin.Plugin.FileToRemux;
+namespace Jellyfin.Plugin.JellyboiFileUpload;
 
 /// <summary>
 /// Plugin configuration for FileToRemux.

@@ -4,7 +4,7 @@ using MediaBrowser.Common.Plugins;
 using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Serialization;
 
-namespace Jellyfin.Plugin.FileToRemux;
+namespace Jellyfin.Plugin.JellyboiFileUpload;
 
 /// <summary>
 /// The main plugin class for FileToRemux Jellyfin integration.
@@ -23,7 +23,7 @@ public class Plugin : BasePlugin<PluginConfiguration>
     }
 
     /// <inheritdoc />
-    public override string Name => "FileToRemux";
+    public override string Name => "Jellyboi File Upload";
 
     /// <inheritdoc />
     public override Guid Id => Guid.Parse("a8f4c281-9f93-4a0b-88a2-11c7d23a49e1");
